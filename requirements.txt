@@ -6,4 +6,6 @@ langchain-google-genai
 langchain-core
 google-generativeai
 sqlalchemy
- 
+jinja2
+prometheus-client
+apscheduler
