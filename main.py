@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# --- LangChain & Gemini imports (your existing setup) ---
+# --- LangChain & Gemini imports ---
 import google.generativeai as genai
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain_community.utilities import SQLDatabase
@@ -27,7 +27,7 @@ BASE_DIR = os.path.dirname(__file__)
 DB_NAME = os.environ.get("DB_NAME", "classicmodels.db")
 DB_PATH = os.path.join(BASE_DIR, DB_NAME)
 
-API_KEY = os.environ.get("API_KEY")  # if set, required in header X-API-KEY
+API_KEY = os.environ.get("API_KEY")
 
 RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "30"))
 RATE_LIMIT_WINDOW_SEC = int(os.environ.get("RATE_LIMIT_WINDOW_SEC", "60"))
@@ -35,7 +35,6 @@ RATE_LIMIT_WINDOW_SEC = int(os.environ.get("RATE_LIMIT_WINDOW_SEC", "60"))
 BACKUP_DIR = os.environ.get("BACKUP_DIR", "/tmp/db_backups")
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
-# ---------- Logging ----------
 LOG_DIR = os.path.join("/tmp", "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 logger = logging.getLogger("classicmodels")
@@ -44,12 +43,10 @@ handler = RotatingFileHandler(os.path.join(LOG_DIR, "app.log"), maxBytes=2_000_0
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 
-# ---------- Prometheus metrics ----------
 REQUEST_COUNTER = Counter("classicmodels_requests_total", "Total number of requests", ["method", "endpoint", "http_status"])
 REQUEST_LATENCY = Histogram("classicmodels_request_latency_seconds", "Request latency", ["endpoint"])
 
-# ---------- Simple in-memory rate limiter ----------
-client_requests: Dict[str, list] = {}  # ip -> [timestamps]
+client_requests: Dict[str, list] = {}
 
 def is_rate_limited(client_id: str) -> bool:
     now = time.time()
@@ -60,7 +57,6 @@ def is_rate_limited(client_id: str) -> bool:
     client_requests[client_id] = punches
     return len(punches) > RATE_LIMIT_REQUESTS
 
-# ---------- Database check & setup ----------
 if not os.path.exists(DB_PATH):
     for f in os.listdir(BASE_DIR):
         if f.startswith("classicmodels") and f.endswith(".db"):
@@ -78,7 +74,6 @@ except Exception as e:
     logger.exception("Database error")
     raise RuntimeError(f"Database error: {str(e)}")
 
-# ---------- LangChain & Gemini initialization ----------
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("No GEMINI_API_KEY set in environment")
@@ -128,7 +123,6 @@ agent = create_sql_agent(
     return_intermediate_steps=False
 )
 
-# ---------- FastAPI app & templates ----------
 app = FastAPI(
     title="ClassicModels Database Assistant",
     description="FastAPI + Gemini + LangChain SQL-agent example with MCO features",
@@ -139,11 +133,11 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 if os.path.isdir(os.path.join(BASE_DIR, "static")):
     app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
-# ---------- Security middleware for docs & endpoints (if API_KEY set) ----------
 @app.middleware("http")
 async def protect_docs_and_rate_limit(request: Request, call_next):
     path = request.url.path
     client = request.client.host if request.client else "unknown"
+
     if is_rate_limited(client):
         REQUEST_COUNTER.labels(method=request.method, endpoint=path, http_status="429").inc()
         return PlainTextResponse("Rate limit exceeded", status_code=status.HTTP_429_TOO_MANY_REQUESTS)
@@ -163,7 +157,6 @@ async def protect_docs_and_rate_limit(request: Request, call_next):
     REQUEST_COUNTER.labels(method=request.method, endpoint=path, http_status=str(response.status_code)).inc()
     return response
 
-# ---------- helper: process query ----------
 def process_query(question: str) -> str:
     try:
         blocked_terms = ["drop", "delete", "insert", "update", "alter", ";--"]
@@ -190,36 +183,22 @@ def process_query(question: str) -> str:
 class QueryRequest(BaseModel):
     question: str
 
-# ---------- Root endpoint with examples ----------
+# **Example questions added here**
+EXAMPLE_QUESTIONS = [
+    "Show me all products in the 'Classic Cars' product line.",
+    "List customers who placed orders in 2024-01.",
+    "What are the total payments made by customer 'John Doe'?",
+    "Give me details of employees in the 'Sales' office.",
+    "How many orders were made last month?"
+]
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    example_questions = [
-        "Show me all products in the 'Classic Cars' product line.",
-        "List customers who placed orders in 2024-01.",
-        "What are the total payments made by customer 'John Doe'?",
-        "Give me details of employees in the 'Sales' office.",
-        "How many orders were made last month?"
-    ]
-
-    example_html = "<ul>"
-    for q in example_questions:
-        example_html += f"<li><code>{q}</code></li>"
-    example_html += "</ul>"
-
-    html_content = f"""
-    <html>
-        <head><title>ClassicModels Database Assistant</title></head>
-        <body style="font-family:Arial, sans-serif; margin:2rem;">
-            <h1>Welcome to the ClassicModels Database Assistant</h1>
-            <p>This API lets you query the ClassicModels database using natural language questions.</p>
-            <h2>Example Questions:</h2>
-            {example_html}
-            <p>Send POST requests to <code>/query</code> with JSON body: <code>{{'question': 'your question here'}}</code></p>
-            <p>If API key security is enabled, include header <code>X-API-KEY</code>.</p>
-        </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "api_key_required": bool(API_KEY),
+        "example_questions": EXAMPLE_QUESTIONS
+    })
 
 @app.post("/query")
 async def query_db(req: QueryRequest):
@@ -246,7 +225,6 @@ def metrics():
     data = generate_latest()
     return PlainTextResponse(data, media_type=CONTENT_TYPE_LATEST)
 
-# ---------- Background scheduled jobs ----------
 def backup_db_job():
     try:
         ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
