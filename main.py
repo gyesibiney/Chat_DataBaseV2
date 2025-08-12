@@ -95,11 +95,10 @@ def process_query(question: str) -> str:
         })
         result = response['output']
 
-        if "
-sql" in result:
-            result = result.split("
-")[-2].replace("
-sql", "").strip()
+        
+        if "\nsql" in result:
+            result = result.split("\n")[-2].replace("\nsql", "").strip()
+
         return result
 
     except Exception as e:
