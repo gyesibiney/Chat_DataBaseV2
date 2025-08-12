@@ -12,10 +12,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from apscheduler.schedulers.background import BackgroundScheduler
-
-# Import Prometheus FastAPI Instrumentator
-from prometheus_fastapi_instrumentator import Instrumentator
 
 # --- LangChain & Gemini imports (your existing setup) ---
 import google.generativeai as genai
@@ -29,7 +27,7 @@ BASE_DIR = os.path.dirname(__file__)
 DB_NAME = os.environ.get("DB_NAME", "classicmodels.db")
 DB_PATH = os.path.join(BASE_DIR, DB_NAME)
 
-API_KEY = os.environ.get("API_KEY")  # Optional API key for security
+API_KEY = os.environ.get("API_KEY")  # if set, required in header X-API-KEY
 
 RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "30"))
 RATE_LIMIT_WINDOW_SEC = int(os.environ.get("RATE_LIMIT_WINDOW_SEC", "60"))
@@ -45,6 +43,10 @@ logger.setLevel(logging.INFO)
 handler = RotatingFileHandler(os.path.join(LOG_DIR, "app.log"), maxBytes=2_000_000, backupCount=3)
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
+
+# ---------- Prometheus metrics ----------
+REQUEST_COUNTER = Counter("classicmodels_requests_total", "Total number of requests", ["method", "endpoint", "http_status"])
+REQUEST_LATENCY = Histogram("classicmodels_request_latency_seconds", "Request latency", ["endpoint"])
 
 # ---------- Simple in-memory rate limiter ----------
 client_requests: Dict[str, list] = {}  # ip -> [timestamps]
@@ -133,9 +135,6 @@ app = FastAPI(
     version="1.0"
 )
 
-# Instrument app with Prometheus metrics
-Instrumentator().instrument(app).expose(app)
-
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 if os.path.isdir(os.path.join(BASE_DIR, "static")):
     app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
@@ -145,19 +144,23 @@ if os.path.isdir(os.path.join(BASE_DIR, "static")):
 async def protect_docs_and_rate_limit(request: Request, call_next):
     path = request.url.path
     client = request.client.host if request.client else "unknown"
-    # rate limit for all endpoints
     if is_rate_limited(client):
+        REQUEST_COUNTER.labels(method=request.method, endpoint=path, http_status="429").inc()
         return PlainTextResponse("Rate limit exceeded", status_code=status.HTTP_429_TOO_MANY_REQUESTS)
 
-    # Protect docs/openapi if API_KEY is set
     if API_KEY:
         protected_paths = ["/docs", "/redoc", "/openapi.json", "/query", "/"]
         if any(path.startswith(p) for p in protected_paths):
             header_key = request.headers.get("x-api-key")
             if header_key != API_KEY:
+                REQUEST_COUNTER.labels(method=request.method, endpoint=path, http_status="401").inc()
                 return PlainTextResponse("Unauthorized - provide X-API-KEY header", status_code=status.HTTP_401_UNAUTHORIZED)
 
+    start = time.time()
     response = await call_next(request)
+    latency = time.time() - start
+    REQUEST_LATENCY.labels(endpoint=path).observe(latency)
+    REQUEST_COUNTER.labels(method=request.method, endpoint=path, http_status=str(response.status_code)).inc()
     return response
 
 # ---------- helper: process query ----------
@@ -182,23 +185,51 @@ def process_query(question: str) -> str:
         return result
     except Exception as e:
         logger.exception("Query processing error")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise
 
-# ---------- Request models ----------
 class QueryRequest(BaseModel):
     question: str
 
-# ---------- Endpoints ----------
+# ---------- Root endpoint with examples ----------
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "api_key_required": bool(API_KEY)})
+    example_questions = [
+        "Show me all products in the 'Classic Cars' product line.",
+        "List customers who placed orders in 2024-01.",
+        "What are the total payments made by customer 'John Doe'?",
+        "Give me details of employees in the 'Sales' office.",
+        "How many orders were made last month?"
+    ]
+
+    example_html = "<ul>"
+    for q in example_questions:
+        example_html += f"<li><code>{q}</code></li>"
+    example_html += "</ul>"
+
+    html_content = f"""
+    <html>
+        <head><title>ClassicModels Database Assistant</title></head>
+        <body style="font-family:Arial, sans-serif; margin:2rem;">
+            <h1>Welcome to the ClassicModels Database Assistant</h1>
+            <p>This API lets you query the ClassicModels database using natural language questions.</p>
+            <h2>Example Questions:</h2>
+            {example_html}
+            <p>Send POST requests to <code>/query</code> with JSON body: <code>{{'question': 'your question here'}}</code></p>
+            <p>If API key security is enabled, include header <code>X-API-KEY</code>.</p>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
 @app.post("/query")
 async def query_db(req: QueryRequest):
     if len(req.question) > 2000:
         raise HTTPException(status_code=413, detail="Question too long")
-    ans = process_query(req.question)
-    return {"result": ans}
+    try:
+        ans = process_query(req.question)
+        return {"result": ans}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/health")
 async def health():
@@ -209,6 +240,11 @@ async def health():
         return {"status": "ok", "db": os.path.exists(DB_PATH)}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+@app.get("/metrics")
+def metrics():
+    data = generate_latest()
+    return PlainTextResponse(data, media_type=CONTENT_TYPE_LATEST)
 
 # ---------- Background scheduled jobs ----------
 def backup_db_job():
@@ -221,7 +257,7 @@ def backup_db_job():
         logger.exception("DB backup failed")
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(backup_db_job, "cron", hour=3)  # daily at 03:00 UTC
+scheduler.add_job(backup_db_job, "cron", hour=3)
 scheduler.start()
 
 @app.on_event("shutdown")
