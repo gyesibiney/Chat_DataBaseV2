@@ -10,8 +10,8 @@ import sqlite3
 import shutil
 
 # ---------- 1. Database setup ----------
-DB_NAME = "classicmodels.db"
-
+#DB_NAME = "classicmodels.db"
+DB_NAME = os.path.join(os.path.dirname(__file__), "db", "classicmodels.db")
 # Ensure the database file exists in working dir
 if not os.path.exists(DB_NAME):
     for file in os.listdir():
@@ -116,5 +116,3 @@ async def query_db(req: QueryRequest):
 @app.get("/")
 async def root():
     return {"message": "ClassicModels Database Assistant API is running"}
-
-# Run with: uvicorn app_fastapi:app --host 0.0.0.0 --port 7860
