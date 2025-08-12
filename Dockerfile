@@ -1,18 +1,17 @@
-# Dockerfile
-FROM python:3.10-slim
+FROM python:3.9
 
 WORKDIR /code
 
-# system deps if needed (sqlite is included)
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+COPY ./requirements.txt /code/requirements.txt
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
+
+# Copy the FastAPI app code to the container
 COPY app_fastapi.py .
 
-# expose the uvicorn port
-EXPOSE 8000
+# Expose the port the FastAPI app will run on
+EXPOSE 7860
 
-# Use uvicorn to run the FastAPI app
-CMD ["uvicorn", "app_fastapi:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# The CMD instruction specifies the command to run when the container starts
+CMD ["uvicorn", "app_fastapi:app", "--host", "0.0.0.0", "--port", "7860"]
