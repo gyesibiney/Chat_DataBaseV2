@@ -2,8 +2,6 @@ from fastapi import FastAPI, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 import google.generativeai as genai
 from langchain_community.agent_toolkits import create_sql_agent
@@ -13,8 +11,6 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 import os
 import sqlite3
 import shutil
-import psutil
-import time
 
 # ---------- 1. Database setup ----------
 DB_NAME = "classicmodels.db"
@@ -100,39 +96,31 @@ def process_query(question: str) -> str:
         })
         result = response['output']
 
-        if "```sql" in result:
-            result = result.split("```")[-2].replace("```sql", "").strip()
+        if "
+sql" in result:
+            result = result.split("
+")[-2].replace("
+sql", "").strip()
         return result
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ---------- 4. FastAPI app ----------
-app = FastAPI(title="ClassicModels Database Assistant", version="1.1.0")
+# ---------- 4. FastAPI app with UI ----------
+app = FastAPI(title="ClassicModels Database Assistant")
 
-# Enable CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Static files & templates
+# Static files and templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 class QueryRequest(BaseModel):
     question: str
 
-# API Endpoint
 @app.post("/query")
 async def query_db(req: QueryRequest):
     answer = process_query(req.question)
     return {"result": answer}
 
-# Web Interface
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request, "result": None})
@@ -141,33 +129,3 @@ async def home(request: Request):
 async def ask(request: Request, question: str = Form(...)):
     result = process_query(question)
     return templates.TemplateResponse("index.html", {"request": request, "result": result, "question": question})
-
-# ---------- 5. Monitoring Endpoints ----------
-@app.get("/health", tags=["Monitoring"])
-def health_check():
-    return {"status": "ok", "message": "API is running"}
-
-@app.get("/metrics", tags=["Monitoring"])
-def get_metrics():
-    process = psutil.Process()
-    uptime = time.time() - process.create_time()
-    return {
-        "cpu_percent": psutil.cpu_percent(),
-        "memory_percent": psutil.virtual_memory().percent,
-        "uptime_seconds": round(uptime, 2)
-    }
-
-# ---------- 6. Custom OpenAPI for nicer docs ----------
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    openapi_schema = get_openapi(
-        title="ClassicModels Database Assistant",
-        version="1.1.0",
-        description="FastAPI app with Gemini LLM, SQLite, UI, and monitoring endpoints.",
-        routes=app.routes,
-    )
-    app.openapi_schema = openapi_schema
-    return app.openapi_schema
-
-app.openapi = custom_openapi
