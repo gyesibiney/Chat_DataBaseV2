@@ -96,10 +96,12 @@ def process_query(question: str) -> str:
         })
         result = response['output']
 
-    if "\nsql" in result:
-        result = result.split("\n")[-2].replace("\nsql", "").strip()
-    return result
+        if "```sql" in result:
+            result = result.split("```")[-2].replace("```sql", "").strip()
+        return result
 
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 # ---------- 4. FastAPI app with UI ----------
 app = FastAPI(title="ClassicModels Database Assistant")
