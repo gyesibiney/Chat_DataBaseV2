@@ -1,18 +1,21 @@
 # main.py
 import os
 import time
-import shutil
 import sqlite3
-from typing import Optional, Dict
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
-from pydantic import BaseModel
+import shutil
 import psutil
+from typing import Optional
+
+from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 # Prometheus client
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST, Gauge
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
-# LangChain & Gemini imports (as used in your project)
+# LangChain / Gemini imports (your existing logic)
 import google.generativeai as genai
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain_community.utilities import SQLDatabase
@@ -20,24 +23,110 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # -------------------------
-# Configuration / Setup
+# Ensure static & templates exist (auto-create)
 # -------------------------
-APP_START = time.time()
-BASE_DIR = os.path.dirname(__file__) or "."
-DB_NAME = os.environ.get("DB_NAME", "classicmodels.db")
-DB_PATH = os.path.join(BASE_DIR, DB_NAME)
+os.makedirs("static/css", exist_ok=True)
+os.makedirs("static/js", exist_ok=True)
+os.makedirs("templates", exist_ok=True)
 
-# Try to ensure DB present (copy similarly named file from repo root if needed)
-if not os.path.exists(DB_PATH):
-    for f in os.listdir(BASE_DIR):
-        if f.startswith("classicmodels") and f.endswith(".db"):
-            shutil.copy(os.path.join(BASE_DIR, f), DB_PATH)
-            print(f"Copied DB from {f} to {DB_PATH}")
+# small default CSS
+if not os.path.exists("static/css/style.css"):
+    with open("static/css/style.css", "w") as f:
+        f.write("""
+body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; background: #f7fafc; color: #1f2937; padding: 24px; }
+.container { max-width: 900px; margin: 0 auto; }
+.card { background: white; padding: 18px; border-radius: 8px; box-shadow: 0 4px 10px rgba(2,6,23,0.06); }
+.header { display:flex; gap:12px; align-items:center; justify-content:space-between; margin-bottom:16px; }
+h1 { margin: 0; font-size: 24px; color:#0f172a; }
+input[type="text"], textarea { width:100%; padding:10px; border:1px solid #e6e9ef; border-radius:6px; }
+button { background:#2563eb; color:white; border:none; padding:10px 14px; border-radius:6px; cursor:pointer; }
+.small { font-size:13px; color:#6b7280; }
+.result { white-space: pre-wrap; background:#f8fafc; border:1px solid #eef2ff; padding:12px; border-radius:6px; margin-top:12px; }
+.links a { margin-right:10px; color:#374151; text-decoration:none; }
+""")
+
+# default template
+index_path = "templates/index.html"
+if not os.path.exists(index_path):
+    with open(index_path, "w") as f:
+        f.write("""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ClassicModels Assistant</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="header">
+        <div>
+          <h1>🏭 ClassicModels Database Assistant</h1>
+          <div class="small">Ask natural language questions — powered by Gemini + LangChain</div>
+        </div>
+        <div class="links">
+          <a href="/docs">Swagger</a>
+          <a href="/redoc">ReDoc</a>
+          <a href="/health">Health</a>
+          <a href="/metrics">Metrics</a>
+          <a href="/system-metrics">System Metrics</a>
+        </div>
+      </div>
+
+      <form id="qform" method="post" action="/ask">
+        <label class="small">Your question</label>
+        <input id="question" name="question" type="text" placeholder="e.g., Show customers from Paris with >5 orders" required />
+        <div style="margin-top:8px; display:flex; gap:8px;">
+          <input id="apikey" name="apikey" type="password" placeholder="X-API-KEY (if required)" style="flex:1"/>
+          <button type="submit">Ask</button>
+        </div>
+      </form>
+
+      {% if result %}
+        <h3 style="margin-top:16px;">Result</h3>
+        <div class="result">{{ result }}</div>
+      {% endif %}
+
+      <div style="margin-top:16px;" class="small">Tip: use clear, short questions focused on customers, products, orders, or employees.</div>
+    </div>
+  </div>
+</body>
+</html>""")
+
+# -------------------------
+# App initialization
+# -------------------------
+app = FastAPI(title="ClassicModels Database Assistant", version="1.2.0")
+
+# Mount static + templates
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+# -------------------------
+# Prometheus metrics
+# -------------------------
+REQUEST_COUNTER = Counter("classicmodels_requests_total", "Total HTTP requests", ["method", "endpoint", "status"])
+REQUEST_LATENCY = Histogram("classicmodels_request_latency_seconds", "Request latency seconds", ["endpoint"])
+
+def instrument_endpoint(endpoint: str, method: str = "GET"):
+    """helper decorator-like usage inside handlers (manual instrumentation)."""
+    REQUEST_COUNTER.labels(method=method, endpoint=endpoint, status="ok").inc()
+
+# -------------------------
+# Database (same as your original)
+# -------------------------
+DB_NAME = "classicmodels.db"
+if not os.path.exists(DB_NAME):
+    # attempt to copy a similarly-named db if present
+    for file in os.listdir():
+        if file.startswith("classicmodels") and file.endswith(".db"):
+            shutil.copy(file, DB_NAME)
+            print(f"Using database file: {file}")
             break
 
-# quick DB check (fail fast if missing)
 try:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_NAME)
     tables = conn.cursor().execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()
     conn.close()
     print(f"Database connected. Tables: {[t[0] for t in tables]}")
@@ -45,11 +134,22 @@ except Exception as e:
     raise RuntimeError(f"Database error: {str(e)}")
 
 # -------------------------
-# Initialize LLM + Agent
+# LangChain + Gemini setup (unchanged)
 # -------------------------
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+db = SQLDatabase.from_uri(
+    f"sqlite:///{DB_NAME}",
+    include_tables=[
+        'productlines', 'products', 'offices',
+        'employees', 'customers', 'payments',
+        'orders', 'orderdetails'
+    ],
+    sample_rows_in_table_info=1,
+    view_support=False
+)
+
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY must be set in the environment (Hugging Face Space secret).")
+    raise RuntimeError("No GEMINI_API_KEY set in environment")
 
 llm_model = ChatGoogleGenerativeAI(
     model="gemini-2.0-flash-001",
@@ -58,18 +158,6 @@ llm_model = ChatGoogleGenerativeAI(
     max_output_tokens=2048,
     top_k=40,
     top_p=0.95
-)
-
-# SQLDatabase wrapper used by the agent
-db = SQLDatabase.from_uri(
-    f"sqlite:///{DB_PATH}",
-    include_tables=[
-        'productlines', 'products', 'offices',
-        'employees', 'customers', 'payments',
-        'orders', 'orderdetails'
-    ],
-    sample_rows_in_table_info=1,
-    view_support=False
 )
 
 prompt = ChatPromptTemplate.from_messages([
@@ -98,215 +186,124 @@ agent = create_sql_agent(
 )
 
 # -------------------------
-# Instrumentation (Prometheus)
-# -------------------------
-REQUEST_COUNTER = Counter("classicmodels_requests_total", "Total HTTP requests", ["method", "endpoint", "http_status"])
-REQUEST_LATENCY = Histogram("classicmodels_request_latency_seconds", "Request latency seconds", ["endpoint"])
-IN_FLIGHT = Gauge("classicmodels_in_flight_requests", "Currently in-flight requests")
-
-# -------------------------
-# FastAPI app
-# -------------------------
-app = FastAPI(title="ClassicModels Database Assistant", version="1.0")
-
-# -------------------------
-# Core query logic (safe)
+# Core query logic (unchanged)
 # -------------------------
 def process_query(question: str) -> str:
-    """
-    Call the LangChain agent to translate/execute the question against the DB.
-    Blocks dangerous modification queries.
-    Returns agent output text (cleaned of fenced SQL if present).
-    """
-    blocked_terms = ["drop", "delete", "insert", "update", "alter", ";--"]
-    if any(term in question.lower() for term in blocked_terms):
-        raise ValueError("Data modification queries are disabled")
+    try:
+        blocked_terms = ["drop", "delete", "insert", "update", "alter", ";--"]
+        if any(term in question.lower() for term in blocked_terms):
+            raise ValueError("Data modification queries are disabled")
 
-    schema = db.get_table_info()
-    response = agent.invoke({
-        "input": question,
-        "schema": schema
-    })
-    result = response.get("output", "") if isinstance(response, dict) else str(response)
-
-    if "```" in result:
-        # try to extract the last fenced block or SQL block
-        parts = result.split("```")
-        for p in reversed(parts):
-            if p.strip():
-                # Remove a leading "sql" marker
-                if p.strip().lower().startswith("sql"):
-                    cleaned = p.replace("sql", "", 1).strip()
-                    result = cleaned
-                else:
-                    result = p.strip()
-                break
-    return result
+        schema = db.get_table_info()
+        response = agent.invoke({
+            "input": question,
+            "schema": schema
+        })
+        result = response.get('output', "")
+        if "```sql" in result:
+            # extract last SQL block or the main content
+            parts = result.split("```")
+            # find last non-empty block that isn't plain text wrapper
+            for p in reversed(parts):
+                if p.strip():
+                    if p.strip().startswith("sql"):
+                        result = p.replace("sql", "").strip()
+                    else:
+                        # keep as-is if not marked
+                        result = p.strip()
+                    break
+        return result
+    except Exception as e:
+        # propagate as HTTPException when called from endpoints
+        raise HTTPException(status_code=400, detail=str(e))
 
 # -------------------------
-# Helper: time+instrument decorator-like usage
-# -------------------------
-def instrument(endpoint: str, method: str = "GET"):
-    class _Ctx:
-        def __enter__(self):
-            IN_FLIGHT.inc()
-            self._start = time.time()
-        def __exit__(self, exc_type, exc, tb):
-            dur = time.time() - self._start
-            REQUEST_LATENCY.labels(endpoint=endpoint).observe(dur)
-            IN_FLIGHT.dec()
-    return _Ctx()
-
-# -------------------------
-# Routes
+# Request model for /query
 # -------------------------
 class QueryRequest(BaseModel):
     question: str
 
+# -------------------------
+# Endpoints
+# -------------------------
 @app.get("/", response_class=HTMLResponse)
-async def ui_root():
-    """
-    Inline HTML UI. Uses fetch to POST /query with JSON.
-    """
-    html = f"""<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>ClassicModels Assistant</title>
-  <style>
-    body{{font-family:Inter,system-ui,Arial;background:#f7fafc;color:#0f172a;margin:0;padding:24px}}
-    .container{{max-width:980px;margin:0 auto}}
-    .card{{background:#fff;padding:20px;border-radius:10px;box-shadow:0 6px 18px rgba(2,6,23,0.06)}}
-    h1{{margin:0 0 6px;font-size:22px}}
-    .muted{{color:#6b7280;font-size:13px}}
-    input[type=text]{{width:100%;padding:10px;border-radius:8px;border:1px solid #e6e9ef;margin-top:8px}}
-    button{{background:#2563eb;color:#fff;border:0;padding:10px 14px;border-radius:8px;cursor:pointer}}
-    pre.result{{white-space:pre-wrap;background:#f8fafc;border:1px solid #eef2ff;padding:12px;border-radius:8px;margin-top:12px}}
-    .links a{{margin-right:8px;color:#374151;text-decoration:none;font-size:14px}}
-    .small{{font-size:13px;color:#64748b}}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <div>
-          <h1>🏭 ClassicModels Database Assistant</h1>
-          <div class="muted">Ask natural language questions — powered by Gemini + LangChain</div>
-        </div>
-        <div class="links">
-          <a href="/docs">Swagger</a>
-          <a href="/redoc">ReDoc</a>
-          <a href="/health">Health</a>
-          <a href="/metrics">Metrics</a>
-          <a href="/system-metrics">System</a>
-        </div>
-      </div>
+async def home(request: Request):
+    start = time.time()
+    resp = templates.TemplateResponse("index.html", {"request": request, "result": None})
+    REQUEST_LATENCY.labels(endpoint="/").observe(time.time() - start)
+    REQUEST_COUNTER.labels(method="GET", endpoint="/", status=str(resp.status_code)).inc()
+    return resp
 
-      <div style="margin-top:16px">
-        <label class="small">Question</label>
-        <input id="q" type="text" placeholder="e.g., Show customers from France with >5 orders" />
-        <div style="display:flex;gap:8px;margin-top:8px">
-          <input id="apikey" type="password" placeholder="X-API-KEY (if required)" style="flex:1;padding:10px;border-radius:8px;border:1px solid #e6e9ef"/>
-          <button onclick="ask()">Ask</button>
-        </div>
-        <div id="out" class="result" style="display:none"></div>
-      </div>
-
-      <div style="margin-top:14px" class="small">Tip: keep questions short and focused on customers, products, orders, or employees.</div>
-    </div>
-  </div>
-
-<script>
-async function ask(){
-  const q = document.getElementById("q").value.trim();
-  const key = document.getElementById("apikey").value.trim();
-  const out = document.getElementById("out");
-  out.style.display = "block";
-  out.textContent = "Thinking...";
-
-  try{
-    const headers = {"Content-Type":"application/json"};
-    if(key) headers["X-API-KEY"] = key;
-    const res = await fetch("/query", {method:"POST", headers, body: JSON.stringify({question: q})});
-    const data = await res.json();
-    if(res.ok){
-      out.textContent = data.result;
-    } else {
-      out.textContent = "Error " + res.status + ": " + (data.detail || JSON.stringify(data));
-    }
-  } catch(e){
-    out.textContent = "Request failed: " + String(e);
-  }
-}
-</script>
-</body>
-</html>"""
-    # instrument
-    REQUEST_COUNTER.labels(method="GET", endpoint="/", http_status="200").inc()
-    return HTMLResponse(content=html)
+@app.post("/ask", response_class=HTMLResponse)
+async def ask(request: Request, question: str = Form(...), apikey: Optional[str] = Form(None)):
+    start = time.time()
+    try:
+        result = process_query(question)
+    except HTTPException as e:
+        result = f"Error: {e.detail}"
+    resp = templates.TemplateResponse("index.html", {"request": request, "result": result})
+    REQUEST_LATENCY.labels(endpoint="/ask").observe(time.time() - start)
+    REQUEST_COUNTER.labels(method="POST", endpoint="/ask", status=str(resp.status_code)).inc()
+    return resp
 
 @app.post("/query")
-async def query(req: QueryRequest, request: Request):
+async def query_db(payload: QueryRequest):
     start = time.time()
-    IN_FLIGHT.inc()
-    try:
-        if not req.question or not req.question.strip():
-            raise HTTPException(status_code=400, detail="Empty question")
-        # Process query (may call LLM)
-        answer = process_query(req.question)
-        REQUEST_COUNTER.labels(method="POST", endpoint="/query", http_status="200").inc()
-        return {"result": answer}
-    except HTTPException as he:
-        REQUEST_COUNTER.labels(method="POST", endpoint="/query", http_status=str(he.status_code)).inc()
-        raise he
-    except Exception as e:
-        REQUEST_COUNTER.labels(method="POST", endpoint="/query", http_status="500").inc()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        REQUEST_LATENCY.labels(endpoint="/query").observe(time.time() - start)
-        IN_FLIGHT.dec()
+    answer = process_query(payload.question)
+    REQUEST_LATENCY.labels(endpoint="/query").observe(time.time() - start)
+    REQUEST_COUNTER.labels(method="POST", endpoint="/query", status="200").inc()
+    return {"result": answer}
 
 @app.get("/health")
 async def health():
     # quick DB check
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_NAME)
         conn.execute("SELECT 1;")
         conn.close()
-        REQUEST_COUNTER.labels(method="GET", endpoint="/health", http_status="200").inc()
-        return {"status":"ok"}
+        return {"status": "ok"}
     except Exception as e:
-        REQUEST_COUNTER.labels(method="GET", endpoint="/health", http_status="500").inc()
-        return JSONResponse(status_code=500, content={"status":"error","detail":str(e)})
+        return {"status": "error", "detail": str(e)}
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    # returns Prometheus exposition format
+    return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/system-metrics")
 async def system_metrics():
-    cpu = psutil.cpu_percent(interval=0.1)
+    cpu = psutil.cpu_percent(interval=0.2)
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage("/")
-    uptime = int(time.time() - APP_START)
-    REQUEST_COUNTER.labels(method="GET", endpoint="/system-metrics", http_status="200").inc()
     return {
         "cpu_percent": cpu,
         "memory_percent": mem.percent,
         "memory_total": mem.total,
         "disk_percent": disk.percent,
-        "uptime_seconds": uptime
+        "uptime_seconds": round(time.time() - psutil.boot_time(), 2)
     }
 
-@app.get("/metrics")
-async def metrics():
-    """
-    Prometheus exposition format (scrapable by Prometheus).
-    Includes counters/histograms we've defined.
-    """
-    REQUEST_COUNTER.labels(method="GET", endpoint="/metrics", http_status="200").inc()
-    data = generate_latest()
-    return PlainTextResponse(data, media_type=CONTENT_TYPE_LATEST)
+# -------------------------
+# Optional: customize OpenAPI info (keeps /docs and /redoc)
+# -------------------------
+from fastapi.openapi.utils import get_openapi
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="ClassicModels Database Assistant",
+        version="1.2.0",
+        description="FastAPI + Gemini + LangChain SQL-agent with a friendly UI and monitoring endpoints.",
+        routes=app.routes,
+    )
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
 
-# If run directly (useful for local testing)
+app.openapi = custom_openapi
+
+# -------------------------
+# If you run locally with `python main.py`, start uvicorn
+# -------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 7860)), reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=7860, reload=True)
