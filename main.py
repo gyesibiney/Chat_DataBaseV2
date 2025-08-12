@@ -1,7 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, Form
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import google.generativeai as genai
 from langchain_community.agent_toolkits import create_sql_agent
@@ -15,6 +12,7 @@ import shutil
 # ---------- 1. Database setup ----------
 DB_NAME = "classicmodels.db"
 
+# Ensure the database file exists in working dir
 if not os.path.exists(DB_NAME):
     for file in os.listdir():
         if file.startswith("classicmodels") and file.endswith(".db"):
@@ -22,6 +20,7 @@ if not os.path.exists(DB_NAME):
             print(f"Using database file: {file}")
             break
 
+# Verify connection
 try:
     conn = sqlite3.connect(DB_NAME)
     tables = conn.cursor().execute(
@@ -96,19 +95,18 @@ def process_query(question: str) -> str:
         })
         result = response['output']
 
-        if "```sql" in result:
-            result = result.split("```")[-2].replace("```sql", "").strip()
+        if "
+sql" in result:
+            result = result.split("
+")[-2].replace("
+sql", "").strip()
         return result
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ---------- 4. FastAPI app with UI ----------
+# ---------- 4. FastAPI app ----------
 app = FastAPI(title="ClassicModels Database Assistant")
-
-# Static files and templates
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
 
 class QueryRequest(BaseModel):
     question: str
@@ -118,11 +116,6 @@ async def query_db(req: QueryRequest):
     answer = process_query(req.question)
     return {"result": answer}
 
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "result": None})
-
-@app.post("/ask", response_class=HTMLResponse)
-async def ask(request: Request, question: str = Form(...)):
-    result = process_query(question)
-    return templates.TemplateResponse("index.html", {"request": request, "result": result, "question": question})
+@app.get("/")
+async def root():
+    return {"message": "ClassicModels Database Assistant API is running"}
