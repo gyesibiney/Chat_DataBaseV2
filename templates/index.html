@@ -1,21 +1,54 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>ClassicModels Assistant</title>
+    <title>ClassicModels Database Assistant</title>
 </head>
 <body>
     <h1>ClassicModels Database Assistant</h1>
 
-    <form method="post" action="/query">
-        <input type="text" name="question" placeholder="Ask a question" size="50" required/>
+    {% if api_key_required %}
+    <p><strong>API key required for access.</strong></p>
+    {% endif %}
+
+    <form method="post" action="/query" id="query-form">
+        <input type="text" name="question" id="question" placeholder="Ask a question..." size="60" required/>
         <button type="submit">Ask</button>
     </form>
 
-    <h2>Example questions</h2>
+    <h2>Example Questions</h2>
     <ul>
-    {% for example in examples %}
-        <li>{{ example }}</li>
+    {% for question in example_questions %}
+        <li><button type="button" onclick="document.getElementById('question').value='{{ question }}';">{{ question }}</button></li>
     {% endfor %}
     </ul>
+
+    <div id="response"></div>
+
+    <script>
+    // Optional: Handle form submission via fetch (AJAX) to show results without page reload
+    const form = document.getElementById('query-form');
+    const responseDiv = document.getElementById('response');
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        responseDiv.textContent = 'Loading...';
+        const question = document.getElementById('question').value;
+        try {
+            const res = await fetch('/query', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({question})
+            });
+            const data = await res.json();
+            if (res.ok) {
+                responseDiv.textContent = data.result;
+            } else {
+                responseDiv.textContent = 'Error: ' + data.detail;
+            }
+        } catch (err) {
+            responseDiv.textContent = 'Request failed';
+        }
+    });
+    </script>
 </body>
 </html>
+
