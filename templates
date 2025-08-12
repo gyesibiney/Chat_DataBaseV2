@@ -1,0 +1,6 @@
+<h2>Example Questions:</h2>
+<ul>
+  {% for question in example_questions %}
+    <li><code>{{ question }}</code></li>
+  {% endfor %}
+</ul>
