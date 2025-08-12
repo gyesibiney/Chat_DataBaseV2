@@ -1,3 +1,8 @@
+import os
+import shutil
+import sqlite3
+import psutil
+import time
 from fastapi import FastAPI, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -10,11 +15,7 @@ from langchain_community.agent_toolkits import create_sql_agent
 from langchain_community.utilities import SQLDatabase
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-import os
-import sqlite3
-import shutil
-import psutil
-import time
+import uvicorn
 
 # ---------- 1. Database setup ----------
 DB_NAME = "classicmodels.db"
@@ -119,6 +120,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Ensure static & templates dirs exist
+os.makedirs("static", exist_ok=True)
+os.makedirs("templates", exist_ok=True)
+
 # Static files & templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
@@ -171,3 +176,8 @@ def custom_openapi():
     return app.openapi_schema
 
 app.openapi = custom_openapi
+
+# ---------- 7. Hugging Face entry ----------
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=7860)
+
