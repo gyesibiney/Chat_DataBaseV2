@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 # Copy the model to the container
 COPY LRR.pkl .
 
+
 # Copy the FastAPI app code to the container
 COPY main.py .
 
