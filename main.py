@@ -96,9 +96,9 @@ def process_query(question: str) -> str:
         })
         result = response['output']
 
-if "\nsql" in result:
-    result = result.split("\n")[-2].replace("\nsql", "").strip()
-return result
+    if "\nsql" in result:
+        result = result.split("\n")[-2].replace("\nsql", "").strip()
+    return result
 
 
 # ---------- 4. FastAPI app with UI ----------
