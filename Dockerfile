@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
 
 # Copy the FastAPI app code to the container
-COPY app_fastapi.py .
+COPY app/app_fastapi.py .
 
 # Expose the port the FastAPI app will run on
 EXPOSE 7860
