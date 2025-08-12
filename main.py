@@ -10,7 +10,7 @@ import sqlite3
 import shutil
 
 # ---------- 1. Database setup ----------
-DB_NAME = "classicmodels 2.db"
+DB_NAME = "classicmodels.db"
 
 # Ensure the database file exists in working dir
 if not os.path.exists(DB_NAME):
