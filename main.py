@@ -1,93 +1,56 @@
-# main.py
-import os
-import time
-import shutil
-import logging
-from logging.handlers import RotatingFileHandler
-from typing import Dict
-from datetime import datetime, timedelta
-
-import sqlite3
-from fastapi import FastAPI, Request, HTTPException, Depends, status
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi import FastAPI, HTTPException, Request, Form
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from apscheduler.schedulers.background import BackgroundScheduler
-
-# --- LangChain & Gemini imports (your existing setup) ---
 import google.generativeai as genai
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain_community.utilities import SQLDatabase
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+import os
+import sqlite3
+import shutil
+import psutil
+import time
 
-# ---------- Configuration ----------
-BASE_DIR = os.path.dirname(__file__)
-DB_NAME = os.environ.get("DB_NAME", "classicmodels.db")
-DB_PATH = os.path.join(BASE_DIR, DB_NAME)
+# ---------- 1. Database setup ----------
+DB_NAME = "classicmodels.db"
 
-# Optional API key to protect endpoints & docs (set in Hugging Face secrets or env)
-API_KEY = os.environ.get("API_KEY")  # if set, required in header X-API-KEY
-
-# Rate limiting settings (very small simple limiter)
-RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "30"))
-RATE_LIMIT_WINDOW_SEC = int(os.environ.get("RATE_LIMIT_WINDOW_SEC", "60"))
-
-# Scheduler settings
-BACKUP_DIR = os.environ.get("BACKUP_DIR", "/tmp/db_backups")
-os.makedirs(BACKUP_DIR, exist_ok=True)
-
-# ---------- Logging ----------
-LOG_DIR = os.path.join("/tmp", "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-logger = logging.getLogger("classicmodels")
-logger.setLevel(logging.INFO)
-handler = RotatingFileHandler(os.path.join(LOG_DIR, "app.log"), maxBytes=2_000_000, backupCount=3)
-handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-logger.addHandler(handler)
-
-# ---------- Prometheus metrics ----------
-REQUEST_COUNTER = Counter("classicmodels_requests_total", "Total number of requests", ["method", "endpoint", "http_status"])
-REQUEST_LATENCY = Histogram("classicmodels_request_latency_seconds", "Request latency", ["endpoint"])
-
-# ---------- Simple in-memory rate limiter ----------
-client_requests: Dict[str, list] = {}  # ip -> [timestamps]
-
-def is_rate_limited(client_id: str) -> bool:
-    now = time.time()
-    window_start = now - RATE_LIMIT_WINDOW_SEC
-    punches = client_requests.get(client_id, [])
-    # remove old
-    punches = [t for t in punches if t >= window_start]
-    punches.append(now)
-    client_requests[client_id] = punches
-    return len(punches) > RATE_LIMIT_REQUESTS
-
-# ---------- Database check & setup ----------
-if not os.path.exists(DB_PATH):
-    # try to find any file starting with classicmodels and copy
-    for f in os.listdir(BASE_DIR):
-        if f.startswith("classicmodels") and f.endswith(".db"):
-            src = os.path.join(BASE_DIR, f)
-            shutil.copy(src, DB_PATH)
-            logger.info(f"Copied DB from {src} to {DB_PATH}")
+if not os.path.exists(DB_NAME):
+    for file in os.listdir():
+        if file.startswith("classicmodels") and file.endswith(".db"):
+            shutil.copy(file, DB_NAME)
+            print(f"Using database file: {file}")
             break
 
 try:
-    conn = sqlite3.connect(DB_PATH)
-    tables = conn.cursor().execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()
+    conn = sqlite3.connect(DB_NAME)
+    tables = conn.cursor().execute(
+        "SELECT name FROM sqlite_master WHERE type='table';"
+    ).fetchall()
     conn.close()
-    logger.info(f"Database connected. Tables: {[t[0] for t in tables]}")
+    print(f"Database connected. Tables: {[t[0] for t in tables]}")
 except Exception as e:
-    logger.exception("Database error")
     raise RuntimeError(f"Database error: {str(e)}")
 
-# ---------- LangChain & Gemini initialization (singletons) ----------
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# ---------- 2. LangChain + Gemini setup ----------
+db = SQLDatabase.from_uri(
+    f"sqlite:///{DB_NAME}",
+    include_tables=[
+        'productlines', 'products', 'offices',
+        'employees', 'customers', 'payments',
+        'orders', 'orderdetails'
+    ],
+    sample_rows_in_table_info=1,
+    view_support=False
+)
+
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 if not GEMINI_API_KEY:
-    raise RuntimeError("No GEMINI_API_KEY set in environment")
+    raise ValueError("No Gemini API key found. Please set GEMINI_API_KEY.")
 
 llm_model = ChatGoogleGenerativeAI(
     model="gemini-2.0-flash-001",
@@ -96,17 +59,6 @@ llm_model = ChatGoogleGenerativeAI(
     max_output_tokens=2048,
     top_k=40,
     top_p=0.95
-)
-
-db = SQLDatabase.from_uri(
-    f"sqlite:///{DB_PATH}",
-    include_tables=[
-        'productlines', 'products', 'offices',
-        'employees', 'customers', 'payments',
-        'orders', 'orderdetails'
-    ],
-    sample_rows_in_table_info=1,
-    view_support=False
 )
 
 prompt = ChatPromptTemplate.from_messages([
@@ -134,45 +86,7 @@ agent = create_sql_agent(
     return_intermediate_steps=False
 )
 
-# ---------- FastAPI app & templates ----------
-app = FastAPI(
-    title="ClassicModels Database Assistant",
-    description="FastAPI + Gemini + LangChain SQL-agent example with MCO features",
-    version="1.0"
-)
-
-# serve static & templates
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
-if os.path.isdir(os.path.join(BASE_DIR, "static")):
-    app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
-
-# ---------- Security middleware for docs & endpoints (if API_KEY set) ----------
-@app.middleware("http")
-async def protect_docs_and_rate_limit(request: Request, call_next):
-    path = request.url.path
-    client = request.client.host if request.client else "unknown"
-    # rate limit for all endpoints
-    if is_rate_limited(client):
-        REQUEST_COUNTER.labels(method=request.method, endpoint=path, http_status="429").inc()
-        return PlainTextResponse("Rate limit exceeded", status_code=status.HTTP_429_TOO_MANY_REQUESTS)
-
-    # Protect docs/openapi if API_KEY is set
-    if API_KEY:
-        protected_paths = ["/docs", "/redoc", "/openapi.json", "/query", "/"]
-        if any(path.startswith(p) for p in protected_paths):
-            header_key = request.headers.get("x-api-key")
-            if header_key != API_KEY:
-                REQUEST_COUNTER.labels(method=request.method, endpoint=path, http_status="401").inc()
-                return PlainTextResponse("Unauthorized - provide X-API-KEY header", status_code=status.HTTP_401_UNAUTHORIZED)
-
-    start = time.time()
-    response = await call_next(request)
-    latency = time.time() - start
-    REQUEST_LATENCY.labels(endpoint=path).observe(latency)
-    REQUEST_COUNTER.labels(method=request.method, endpoint=path, http_status=str(response.status_code)).inc()
-    return response
-
-# ---------- helper: process query ----------
+# ---------- 3. Query processing ----------
 def process_query(question: str) -> str:
     try:
         blocked_terms = ["drop", "delete", "insert", "update", "alter", ";--"]
@@ -184,74 +98,76 @@ def process_query(question: str) -> str:
             "input": question,
             "schema": schema
         })
-        result = response.get('output', "")
+        result = response['output']
+
         if "```sql" in result:
-            # keep last code block
-            parts = result.split("```")
-            for p in reversed(parts):
-                if "sql" in p:
-                    result = p.replace("sql", "").strip()
-                    break
+            result = result.split("```")[-2].replace("```sql", "").strip()
         return result
-    except Exception as e:
-        logger.exception("Query processing error")
-        raise
 
-# ---------- Request models ----------
-class QueryRequest(BaseModel):
-    question: str
-
-# ---------- Endpoints ----------
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "api_key_required": bool(API_KEY)})
-
-@app.post("/query")
-async def query_db(req: QueryRequest):
-    # basic server-side size protection
-    if len(req.question) > 2000:
-        raise HTTPException(status_code=413, detail="Question too long")
-    try:
-        ans = process_query(req.question)
-        return {"result": ans}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/health")
-async def health():
-    # Simple DB check
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("SELECT 1;")
-        conn.close()
-        return {"status": "ok", "db": os.path.exists(DB_PATH)}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
+# ---------- 4. FastAPI app ----------
+app = FastAPI(title="ClassicModels Database Assistant", version="1.1.0")
 
-@app.get("/metrics")
-def metrics():
-    data = generate_latest()
-    return PlainTextResponse(data, media_type=CONTENT_TYPE_LATEST)
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# ---------- Background scheduled jobs ----------
-def backup_db_job():
-    try:
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-        backup_path = os.path.join(BACKUP_DIR, f"classicmodels_{ts}.db")
-        shutil.copy(DB_PATH, backup_path)
-        logger.info(f"DB backup created: {backup_path}")
-    except Exception:
-        logger.exception("DB backup failed")
+# Static files & templates
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
-scheduler = BackgroundScheduler()
-scheduler.add_job(backup_db_job, "cron", hour=3)  # daily at 03:00 UTC
-scheduler.start()
+class QueryRequest(BaseModel):
+    question: str
 
-# Graceful shutdown to stop scheduler
-@app.on_event("shutdown")
-def shutdown_event():
-    try:
-        scheduler.shutdown(wait=False)
-    except Exception:
-        pass
+# API Endpoint
+@app.post("/query")
+async def query_db(req: QueryRequest):
+    answer = process_query(req.question)
+    return {"result": answer}
 
+# Web Interface
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request, "result": None})
+
+@app.post("/ask", response_class=HTMLResponse)
+async def ask(request: Request, question: str = Form(...)):
+    result = process_query(question)
+    return templates.TemplateResponse("index.html", {"request": request, "result": result, "question": question})
+
+# ---------- 5. Monitoring Endpoints ----------
+@app.get("/health", tags=["Monitoring"])
+def health_check():
+    return {"status": "ok", "message": "API is running"}
+
+@app.get("/metrics", tags=["Monitoring"])
+def get_metrics():
+    process = psutil.Process()
+    uptime = time.time() - process.create_time()
+    return {
+        "cpu_percent": psutil.cpu_percent(),
+        "memory_percent": psutil.virtual_memory().percent,
+        "uptime_seconds": round(uptime, 2)
+    }
+
+# ---------- 6. Custom OpenAPI for nicer docs ----------
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="ClassicModels Database Assistant",
+        version="1.1.0",
+        description="FastAPI app with Gemini LLM, SQLite, UI, and monitoring endpoints.",
+        routes=app.routes,
+    )
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
