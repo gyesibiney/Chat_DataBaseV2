@@ -129,11 +129,9 @@ def process_query(question: str) -> str:
     })
     result = response.get("output", "") if isinstance(response, dict) else str(response)
 
-    if "
-" in result:
+    if "```" in result:
         # try to extract the last fenced block or SQL block
-        parts = result.split("
-")
+        parts = result.split("```")
         for p in reversed(parts):
             if p.strip():
                 # Remove a leading "sql" marker
