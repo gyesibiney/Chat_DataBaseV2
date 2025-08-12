@@ -95,10 +95,11 @@ def process_query(question: str) -> str:
         })
         result = response['output']
 
-        
-        if "\nsql" in result:
-            result = result.split("\n")[-2].replace("\nsql", "").strip()
-
+        if "
+sql" in result:
+            result = result.split("
+")[-2].replace("
+sql", "").strip()
         return result
 
     except Exception as e:
@@ -117,4 +118,4 @@ async def query_db(req: QueryRequest):
 
 @app.get("/")
 async def root():
-    return {"message": "ClassicModels Database Assistant API is running"}
+    return {"message": "ClassicModels Database Assist is running"}
