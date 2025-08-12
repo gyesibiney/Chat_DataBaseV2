@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+langchain-community
+langchain-google-genai
+langchain-core
+google-generativeai
+sqlalchemy
+sqlite3  
