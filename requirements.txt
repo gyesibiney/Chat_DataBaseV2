@@ -6,4 +6,4 @@ langchain-google-genai
 langchain-core
 google-generativeai
 sqlalchemy
-sqlite3  
+ 
