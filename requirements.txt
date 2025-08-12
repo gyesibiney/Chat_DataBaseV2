@@ -10,3 +10,4 @@ jinja2
 prometheus-client
 apscheduler
 psutil
+prometheus-fastapi-instrumentator
