@@ -10,9 +10,8 @@ import sqlite3
 import shutil
 
 # ---------- 1. Database setup ----------
-BASE_DIR = os.path.dirname(__file__)
-DB_NAME = os.path.join(BASE_DIR, "classicmodels.db")
-#DB_NAME = os.path.join(os.path.dirname(__file__), "db", "classicmodels.db")
+DB_NAME = "classicmodels 2.db"
+
 # Ensure the database file exists in working dir
 if not os.path.exists(DB_NAME):
     for file in os.listdir():
