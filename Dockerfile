@@ -9,8 +9,7 @@ RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
 # Copy the FastAPI app code to the container
 COPY main.py .
-COPY classicmodels2.db .
-COPY README.md .
+COPY classicmodels.db .
 
 # Expose the port the FastAPI app will run on
 EXPOSE 7860
