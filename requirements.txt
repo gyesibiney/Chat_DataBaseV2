@@ -9,3 +9,4 @@ sqlalchemy
 jinja2
 prometheus-client
 apscheduler
+psutil
