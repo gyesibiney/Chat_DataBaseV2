@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ClassicModels Assistant</title>
+</head>
+<body>
+    <h1>ClassicModels Database Assistant</h1>
+
+    <form method="post" action="/query">
+        <input type="text" name="question" placeholder="Ask a question" size="50" required/>
+        <button type="submit">Ask</button>
+    </form>
+
+    <h2>Example questions</h2>
+    <ul>
+    {% for example in examples %}
+        <li>{{ example }}</li>
+    {% endfor %}
+    </ul>
+</body>
+</html>
