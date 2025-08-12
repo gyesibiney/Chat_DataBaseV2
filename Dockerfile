@@ -7,7 +7,7 @@ COPY ./requirements.txt /code/requirements.txt
 RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
 # Copy the database into the container
-COPY my_database.db /code/classicsmodels2.db
+COPY classicmodels2.db /code/classicmodels2.db
 
 # Copy the FastAPI app code to the container
 COPY main.py .
