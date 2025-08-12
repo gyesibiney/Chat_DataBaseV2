@@ -1,7 +1,7 @@
 # Dockerfile
 FROM python:3.10-slim
 
-WORKDIR /app
+WORKDIR /code
 
 # system deps if needed (sqlite is included)
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY app_fastapi.py .
 
 # expose the uvicorn port
 EXPOSE 8000
