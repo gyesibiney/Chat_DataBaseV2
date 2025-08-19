@@ -82,20 +82,6 @@ Can be deployed on Azure App Service or AKS (Kubernetes).
 
 Supports scaling, monitoring, and secret management.
 
-📌 Author
-👤 David Gyesi Biney
-🔗 Hugging Face Profile: gyesibiney
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -113,3 +99,8 @@ pinned: false
 ---
 
 Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+
+
+📌 Author
+👤 David Gyesi Biney
+🔗 Hugging Face Profile: gyesibiney
